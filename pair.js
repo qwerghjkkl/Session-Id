@@ -49,30 +49,29 @@ router.get('/', async (req, res) => {
         generateHighQualityLinkPreview: false,
     });
 
-    // Listen for credentials update to save them
-    KnightBot.ev.on('creds.update', saveCreds);
+    // Listen for credentials update
+    let sessionSent = false;
+    KnightBot.ev.on('creds.update', async () => {
+        if (sessionSent) return;
+        try {
+            const sessionBuffer = fs.readFileSync(`${dirs}/creds.json`);
+            let sessionBase64 = sessionBuffer.toString('base64');
+            sessionBase64 = sessionBase64.replace(/\=/g, '*'); // CYPHER-X style
 
-    // Wait a bit to ensure creds.json is written
-    await delay(1500);
+            const cypherSession = `CYPHER-X:~${sessionBase64}`;
+            res.send({ session: cypherSession });
+            sessionSent = true;
 
-    try {
-        const sessionBuffer = fs.readFileSync(`${dirs}/creds.json`);
-        let sessionBase64 = sessionBuffer.toString('base64');
-        sessionBase64 = sessionBase64.replace(/\=/g, '*'); // CYPHER-X style
+            console.log("✔ CYPHER-X session generated and sent!");
+        } catch (err) {
+            console.error("❌ Failed to generate session:", err);
+            if (!res.headersSent) res.status(500).send({ code: 'Failed to generate session' });
+        }
 
-        const cypherSession = `CYPHER-X:~${sessionBase64}`;
+        // Cleanup session folder after a short delay
+        setTimeout(() => removeFile(dirs), 5000);
+    });
 
-        // Send session immediately
-        res.send({ session: cypherSession });
-
-        console.log("✔ CYPHER-X session generated and sent!");
-    } catch (err) {
-        console.error("❌ Failed to generate session:", err);
-        if (!res.headersSent) res.status(500).send({ code: 'Failed to generate session' });
-    }
-
-    // Cleanup session folder after a short delay
-    setTimeout(() => removeFile(dirs), 5000);
 });
 
 export default router;
