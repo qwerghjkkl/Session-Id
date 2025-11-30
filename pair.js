@@ -1,9 +1,16 @@
 import express from 'express';
 import fs from 'fs';
 import pino from 'pino';
-import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import {
+    makeWASocket,
+    useMultiFileAuthState,
+    delay,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    jidNormalizedUser,
+    fetchLatestBaileysVersion
+} from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
-import crypto from 'crypto';
 
 const router = express.Router();
 
@@ -17,33 +24,17 @@ function removeFile(FilePath) {
     }
 }
 
-// Convert creds.json → CYPHER-X style session ID
-function generateCypherXSession(credsPath) {
-    const buffer = fs.readFileSync(credsPath);
-    let base64 = buffer.toString('base64');
-
-    // Insert random '*' separators to imitate CYPHER-X style
-    const parts = [];
-    let i = 0;
-    while (i < base64.length) {
-        const len = Math.floor(Math.random() * 20) + 10; // random chunk 10-30 chars
-        parts.push(base64.slice(i, i + len));
-        i += len;
-    }
-
-    return 'CYPHER-X:~' + parts.join('*');
-}
-
 router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
 
     await removeFile(dirs);
-    num = num.replace(/[^0-9]/g, '');
 
-    const phone = pn('+' + num);
+    const phone = pn('+' + (num || ''));
     if (!phone.isValid()) {
-        if (!res.headersSent) return res.status(400).send({ code: 'Invalid phone number.' });
+        if (!res.headersSent) {
+            return res.status(400).send({ code: 'Invalid phone number. Use full international number.' });
+        }
         return;
     }
 
@@ -64,25 +55,46 @@ router.get('/', async (req, res) => {
                 logger: pino({ level: "fatal" }).child({ level: "fatal" }),
                 browser: Browsers.windows('Chrome'),
                 markOnlineOnConnect: false,
+                generateHighQualityLinkPreview: false,
+                defaultQueryTimeoutMs: 60000,
+                connectTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
+                retryRequestDelayMs: 250,
+                maxRetries: 5,
             });
 
             KnightBot.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect } = update;
+                const { connection, lastDisconnect, isNewLogin } = update;
 
                 if (connection === 'open') {
+                    console.log("🔥 Connected successfully! Generating CYPHER-X session ID...");
+
                     try {
-                        const cypherXSession = generateCypherXSession(`${dirs}/creds.json`);
+                        const sessionBuffer = fs.readFileSync(`${dirs}/creds.json`);
+                        const sessionBase64 = sessionBuffer.toString('base64');
+
+                        // Format exactly like CYPHER-X style
+                        const cypherSession = `CYPHER-X:~${sessionBase64.replace(/\=/g,'*')}`;
+
                         if (!res.headersSent) {
-                            await res.send({ session: cypherXSession });
+                            await res.send({ session: cypherSession });
                         }
 
+                        // Cleanup
+                        console.log("🧹 Cleaning session directory...");
                         await delay(1000);
                         removeFile(dirs);
+                        console.log("🔥 Session cleaned. Done.");
                     } catch (err) {
-                        console.error("Error sending session:", err);
+                        console.error("❌ Error generating session:", err);
                         removeFile(dirs);
+                        if (!res.headersSent) {
+                            res.status(500).send({ code: 'Failed to generate session' });
+                        }
                     }
                 }
+
+                if (isNewLogin) console.log("🔐 New login detected");
 
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -95,24 +107,26 @@ router.get('/', async (req, res) => {
                 }
             });
 
-            KnightBot.ev.on('creds.update', saveCreds);
-
-            // Pairing code request
+            // Pairing Code
             if (!KnightBot.authState.creds.registered) {
                 await delay(3000);
-                num = num.replace(/[^\d+]/g, '');
-                if (num.startsWith('+')) num = num.substring(1);
-
                 try {
                     let code = await KnightBot.requestPairingCode(num);
-                    code = code?.match(/.{1,4}/g)?.join('-') || code;
+                    if (!code) code = "FAILED_TO_GENERATE";
+                    code = code.match(/.{1,4}/g)?.join('-') || code;
+
                     if (!res.headersSent) {
-                        console.log({ num, code });
+                        await res.send({ code });
+                        console.log("✔ Pairing code sent:", code);
                     }
-                } catch (error) {
-                    console.error('Error requesting pairing code:', error);
+                } catch (err) {
+                    console.error("❌ Error requesting pairing code:", err);
+                    if (!res.headersSent) res.status(503).send({ code: 'Failed to generate pairing code' });
                 }
             }
+
+            KnightBot.ev.on('creds.update', saveCreds);
+
         } catch (err) {
             console.error('Error initializing session:', err);
             if (!res.headersSent) res.status(503).send({ code: 'Service Unavailable' });
@@ -120,6 +134,18 @@ router.get('/', async (req, res) => {
     }
 
     await initiateSession();
+});
+
+// Handle uncaught errors
+process.on('uncaughtException', (err) => {
+    const e = String(err);
+    if (
+        e.includes("conflict") || e.includes("not-authorized") || e.includes("Socket connection timeout") ||
+        e.includes("rate-overlimit") || e.includes("Connection Closed") || e.includes("Timed Out") ||
+        e.includes("Stream Errored") || e.includes("Stream Errored (restart required)") ||
+        e.includes("statusCode: 515") || e.includes("statusCode: 503")
+    ) return;
+    console.log('Caught exception: ', err);
 });
 
 export default router;
